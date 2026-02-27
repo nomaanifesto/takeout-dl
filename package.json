@@ -1,0 +1,16 @@
+{
+  "name": "takeout-dl",
+  "version": "1.0.0",
+  "description": "Reliably download all parts of a Google Takeout archive using Playwright",
+  "main": "index.js",
+  "bin": {
+    "takeout-dl": "./index.js"
+  },
+  "scripts": {
+    "postinstall": "playwright install chrome"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "playwright": "^1.44.0"
+  }
+}
