@@ -1,7 +1,7 @@
 {
   "name": "takeout-dl",
-  "version": "1.0.0",
-  "description": "Reliably download all parts of a Google Takeout archive using Playwright",
+  "version": "2.0.0",
+  "description": "TUI-guided Google Takeout batch downloader using Playwright",
   "main": "index.js",
   "bin": {
     "takeout-dl": "./index.js"
@@ -10,7 +10,8 @@
     "postinstall": "playwright install chrome"
   },
   "dependencies": {
-    "commander": "^12.0.0",
+    "@clack/prompts": "^0.7.0",
+    "chalk": "^4.1.2",
     "playwright": "^1.44.0"
   }
 }

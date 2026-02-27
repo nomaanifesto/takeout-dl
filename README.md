@@ -78,7 +78,7 @@ Each file is opened in its own tab. Playwright captures the download event (incl
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/takeout-dl
+git clone https://github.com/Uxnomaan/takeout-dl
 cd takeout-dl
 npm install
 ```
@@ -87,45 +87,43 @@ npm install
 
 ## Usage
 
-### Find your archive ID and user ID
-
-Open the Google Takeout email, right-click any download button and copy the link. It looks like:
-
-```
-https://takeout.google.com/takeout/download?j=<archive-id>&i=0&user=<user-id>
-```
-
-### Run
-
 ```bash
-node index.js \
-  --archive-id <archive-id> \
-  --user-id <user-id> \
-  --start 0 \
-  --end 354 \
-  --output /path/to/output
+node index.js
 ```
 
-A Chrome window opens. Sign into Google, then press Enter in the terminal. The tool downloads each part sequentially, skipping files that already exist (safe to resume after interruption).
+The TUI walks you through everything:
 
-### Options
+```
+  ◆  Paste a download URL from your Takeout email
+  │  https://takeout.google.com/takeout/download?j=...&i=0&user=...
 
-| Option | Description | Default |
-|---|---|---|
-| `-j, --archive-id` | Takeout archive ID | required |
-| `-u, --user-id` | Google user ID | required |
-| `-s, --start` | First part index | `0` |
-| `-e, --end` | Last part index (inclusive) | `354` |
-| `-o, --output` | Output directory | `./downloads` |
-| `--timeout` | Per-file timeout (ms) | `600000` |
-| `--profile` | Chrome profile directory | `~/.takeout-dl-profile` |
-| `--delay` | Delay between downloads (ms) | `1000` |
+  ◆  How many zip files does your archive have?
+  │  355
+
+  ◆  Start from which part? (0 = beginning, change to resume)
+  │  0
+
+  ◆  Where should the zip files be saved?
+  │  /Volumes/nas/photos/takeout
+
+  ┌─ Plan ──────────────────────────────────────────────────┐
+  │  Archive   cd93e2fe-...                                  │
+  │  Parts     0 → 354  (355 files)                         │
+  │  Output    /Volumes/nas/photos/takeout                   │
+  └─────────────────────────────────────────────────────────┘
+
+  ◆  Start downloading? Yes
+
+  → Chrome opens — sign into Google, press Enter to begin
+
+  ✓ [1/355] takeout-20260226T034450Z-3-001.zip  2.10 GB  4s
+  ✓ [2/355] takeout-20260226T034450Z-3-002.zip  2.10 GB  3m 12s
+  ...
+```
 
 ### Resuming
 
-If the run is interrupted, rerun the same command. Files that already exist and are larger than 1 MB are skipped automatically.
-
-If specific parts failed, the tool prints the failed indices and a suggested `--start`/`--end` for a retry run.
+If the run is interrupted, rerun `node index.js` and enter the failed part number as the start. Files already downloaded (> 1 MB) are automatically skipped. The tool prints failed indices and the resume start number at the end of every run.
 
 ## After downloading: import into Immich
 

@@ -1,83 +1,149 @@
 #!/usr/bin/env node
 
+const { intro, outro, text, confirm, spinner: createSpinner, log, note, cancel, isCancel } = require('@clack/prompts');
 const { chromium } = require('playwright');
-const { program } = require('commander');
+const chalk = require('chalk');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const readline = require('readline');
 
-program
-  .name('takeout-dl')
-  .description('Download all parts of a Google Takeout archive')
-  .requiredOption('-j, --archive-id <id>', 'Archive ID from the Takeout download URL')
-  .requiredOption('-u, --user-id <id>', 'User ID from the Takeout download URL')
-  .option('-s, --start <n>', 'First part index to download (0-based)', '0')
-  .option('-e, --end <n>', 'Last part index to download (inclusive)', '354')
-  .option('-o, --output <dir>', 'Directory to save zip files', './downloads')
-  .option('--timeout <ms>', 'Per-file download timeout in milliseconds', '600000')
-  .option('--profile <dir>', 'Chrome profile directory to persist login', '~/.takeout-dl-profile')
-  .option('--delay <ms>', 'Delay between downloads in milliseconds', '1000')
-  .addHelpText('after', `
-Examples:
-  # Download all 355 parts
-  takeout-dl -j cd93e2fe-8de1-4abd-ad9e-03c5daa06a00 -u 108202292654209846206 -e 354 -o /mnt/nas/photos/takeout
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
-  # Resume from part 42
-  takeout-dl -j cd93e2fe-8de1-4abd-ad9e-03c5daa06a00 -u 108202292654209846206 -s 42 -e 354 -o /mnt/nas/photos/takeout
+function parseTakeoutUrl(url) {
+  try {
+    const u = new URL(url.trim());
+    const archiveId = u.searchParams.get('j');
+    const userId = u.searchParams.get('user');
+    if (archiveId && userId) return { archiveId, userId };
+  } catch {}
+  return null;
+}
 
-How to find your archive ID and user ID:
-  Open the Google Takeout email, copy one of the download links. It looks like:
-  https://takeout.google.com/takeout/download?j=<archive-id>&i=0&user=<user-id>
-  `)
-  .parse();
+function formatBytes(bytes) {
+  if (bytes >= 1e9) return chalk.cyan(`${(bytes / 1e9).toFixed(2)} GB`);
+  if (bytes >= 1e6) return chalk.yellow(`${(bytes / 1e6).toFixed(1)} MB`);
+  return `${bytes} B`;
+}
 
-const opts = program.opts();
+function formatElapsed(startMs) {
+  const s = Math.floor((Date.now() - startMs) / 1000);
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+}
 
-const ARCHIVE_ID = opts.archiveId;
-const USER_ID = opts.userId;
-const START = parseInt(opts.start, 10);
-const END = parseInt(opts.end, 10);
-const OUTPUT_DIR = path.resolve(opts.output.replace(/^~/, os.homedir()));
-const TIMEOUT = parseInt(opts.timeout, 10);
-const PROFILE_DIR = path.resolve(opts.profile.replace(/^~/, os.homedir()));
-const DELAY = parseInt(opts.delay, 10);
-
-function waitForEnter(prompt) {
+function waitForEnter() {
   return new Promise(resolve => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(prompt, () => { rl.close(); resolve(); });
+    rl.question('', () => { rl.close(); resolve(); });
   });
 }
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(r => setTimeout(r, ms));
 }
 
-function formatBytes(bytes) {
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
-  return `${bytes} B`;
-}
+// ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
-  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-  fs.mkdirSync(PROFILE_DIR, { recursive: true });
+  console.clear();
 
-  const total = END - START + 1;
-  console.log(`\ntakeout-dl: downloading parts ${START}–${END} (${total} files)`);
-  console.log(`Output: ${OUTPUT_DIR}\n`);
+  intro(
+    chalk.bgBlue.white.bold('  takeout-dl  ') +
+    chalk.dim('  Google Takeout batch downloader')
+  );
 
-  const context = await chromium.launchPersistentContext(PROFILE_DIR, {
+  // ── Step 1: Parse a download URL ─────────────────────────────────────────
+
+  log.info('Open your Takeout email, right-click any download button, and copy the link.');
+
+  const urlInput = await text({
+    message: 'Paste a download URL',
+    placeholder: 'https://takeout.google.com/takeout/download?j=...&i=0&user=...',
+    validate: v => {
+      if (!v.trim()) return 'Required';
+      if (!parseTakeoutUrl(v)) return 'Could not find archive ID and user ID in that URL';
+    },
+  });
+  if (isCancel(urlInput)) { cancel('Cancelled'); process.exit(0); }
+
+  const { archiveId, userId } = parseTakeoutUrl(urlInput);
+  log.success(`Archive: ${chalk.cyan(archiveId)}`);
+  log.success(`User:    ${chalk.cyan(userId)}`);
+
+  // ── Step 2: Total number of zip files ────────────────────────────────────
+
+  const totalInput = await text({
+    message: 'How many zip files does your archive have?',
+    placeholder: '355',
+    validate: v => {
+      const n = parseInt(v, 10);
+      if (isNaN(n) || n < 1) return 'Enter a number greater than 0';
+    },
+  });
+  if (isCancel(totalInput)) { cancel('Cancelled'); process.exit(0); }
+  const total = parseInt(totalInput, 10);
+
+  // ── Step 3: Resume point ─────────────────────────────────────────────────
+
+  const startInput = await text({
+    message: 'Start from which part? (0 = beginning, change to resume)',
+    initialValue: '0',
+    validate: v => {
+      const n = parseInt(v, 10);
+      if (isNaN(n) || n < 0) return 'Enter 0 or greater';
+      if (n >= total) return `Must be less than total (${total})`;
+    },
+  });
+  if (isCancel(startInput)) { cancel('Cancelled'); process.exit(0); }
+  const start = parseInt(startInput, 10);
+
+  // ── Step 4: Output directory ─────────────────────────────────────────────
+
+  const outputInput = await text({
+    message: 'Where should the zip files be saved?',
+    initialValue: path.join(os.homedir(), 'Downloads', 'takeout'),
+    validate: v => { if (!v.trim()) return 'Required'; },
+  });
+  if (isCancel(outputInput)) { cancel('Cancelled'); process.exit(0); }
+  const outputDir = path.resolve(outputInput.replace(/^~/, os.homedir()));
+
+  // ── Summary & confirm ─────────────────────────────────────────────────────
+
+  const end = total - 1;
+  const count = end - start + 1;
+
+  note(
+    [
+      `Archive   ${chalk.cyan(archiveId)}`,
+      `User      ${chalk.cyan(userId)}`,
+      `Parts     ${chalk.yellow(start)} → ${chalk.yellow(end)}  ${chalk.dim(`(${count} files)`)}`,
+      `Output    ${chalk.green(outputDir)}`,
+    ].join('\n'),
+    'Plan'
+  );
+
+  const ready = await confirm({ message: 'Start downloading?' });
+  if (isCancel(ready) || !ready) { cancel('Cancelled'); process.exit(0); }
+
+  // ── Launch browser ────────────────────────────────────────────────────────
+
+  fs.mkdirSync(outputDir, { recursive: true });
+  const profileDir = path.join(os.homedir(), '.takeout-dl-profile');
+  fs.mkdirSync(profileDir, { recursive: true });
+
+  const launchSpinner = createSpinner();
+  launchSpinner.start('Launching Chrome...');
+
+  const context = await chromium.launchPersistentContext(profileDir, {
     channel: 'chrome',
     headless: false,
     acceptDownloads: true,
-    downloadsPath: OUTPUT_DIR,
+    downloadsPath: outputDir,
     args: ['--disable-blink-features=AutomationControlled'],
     ignoreDefaultArgs: ['--enable-automation'],
   });
 
-  // Mask automation fingerprint on every new page
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     window.chrome = { runtime: {} };
@@ -86,74 +152,104 @@ async function main() {
   const page = context.pages()[0] || await context.newPage();
   await page.goto('https://google.com');
 
-  await waitForEnter('>>> Sign into Google in the browser window that opened, then press Enter here to start downloading... ');
+  launchSpinner.stop('Chrome is open');
+
+  log.warn('Sign into Google in the browser window, then come back here.');
+  process.stdout.write(chalk.dim('  Press Enter when ready... '));
+  await waitForEnter();
+  console.log();
+
+  // ── Download loop ─────────────────────────────────────────────────────────
 
   const failed = [];
   let completed = 0;
   let skipped = 0;
+  const startTime = Date.now();
 
-  for (let i = START; i <= END; i++) {
-    const partNum = i - START + 1;
-    const url = `https://takeout.google.com/takeout/download?j=${ARCHIVE_ID}&i=${i}&user=${USER_ID}`;
+  for (let i = start; i <= end; i++) {
+    const partNum = i - start + 1;
+    const url = `https://takeout.google.com/takeout/download?j=${archiveId}&i=${i}&user=${userId}`;
+    const progress = chalk.dim(`[${partNum}/${count}]`);
 
-    process.stdout.write(`[${partNum}/${total}] part ${i} ... `);
+    const sp = createSpinner();
+    sp.start(`${progress} Downloading part ${i}...`);
 
     const tab = await context.newPage();
 
     try {
       const [download] = await Promise.all([
-        tab.waitForEvent('download', { timeout: TIMEOUT }),
+        tab.waitForEvent('download', { timeout: 600_000 }),
         tab.goto(url),
       ]);
 
       const filename = download.suggestedFilename();
-      const destPath = path.join(OUTPUT_DIR, filename);
+      const destPath = path.join(outputDir, filename);
 
-      if (fs.existsSync(destPath)) {
-        const existing = fs.statSync(destPath).size;
-        if (existing > 1024 * 1024) { // > 1MB means it's a real zip, not an HTML error page
-          console.log(`skipped (${filename} already exists)`);
-          await download.cancel();
-          skipped++;
-          continue;
-        }
-        // Small file = previous failed download, overwrite it
-        fs.unlinkSync(destPath);
+      // Skip if already fully downloaded
+      if (fs.existsSync(destPath) && fs.statSync(destPath).size > 1024 * 1024) {
+        sp.stop(`${chalk.dim('⟳')} ${progress} ${chalk.dim(filename)} — already exists`);
+        await download.cancel();
+        skipped++;
+        continue;
       }
+
+      if (fs.existsSync(destPath)) fs.unlinkSync(destPath); // remove previous partial
 
       await download.saveAs(destPath);
       const size = fs.statSync(destPath).size;
 
       if (size < 1024 * 1024) {
-        // Downloaded an HTML error page instead of a zip
         fs.unlinkSync(destPath);
-        throw new Error(`received HTML instead of zip (${formatBytes(size)}) — session may have expired`);
+        throw new Error('Received an HTML page instead of a zip — session may have expired. Re-run to resume.');
       }
 
-      console.log(`✓  ${filename}  (${formatBytes(size)})`);
+      sp.stop(
+        `${chalk.green('✓')} ${progress} ${chalk.bold(filename)}  ` +
+        `${formatBytes(size)}  ${chalk.dim(formatElapsed(startTime))}`
+      );
       completed++;
+
     } catch (err) {
-      console.log(`✗  ${err.message}`);
+      sp.stop(`${chalk.red('✗')} ${progress} Part ${i} — ${chalk.red(err.message)}`);
       failed.push(i);
     } finally {
       await tab.close();
     }
 
-    if (i < END) await sleep(DELAY);
-  }
-
-  console.log(`\n─────────────────────────────────────`);
-  console.log(`Done.  ✓ ${completed} downloaded  ⟳ ${skipped} skipped  ✗ ${failed.length} failed`);
-
-  if (failed.length > 0) {
-    console.log(`\nFailed indices: ${failed.join(', ')}`);
-    console.log(`Retry with: --start ${Math.min(...failed)} --end ${Math.max(...failed)}`);
+    if (i < end) await sleep(500);
   }
 
   await context.close();
+
+  // ── Summary ───────────────────────────────────────────────────────────────
+
+  console.log();
+  note(
+    [
+      `${chalk.green('✓')} Downloaded  ${chalk.bold(completed)}`,
+      `${chalk.dim('⟳')} Skipped     ${skipped}`,
+      `${chalk.red('✗')} Failed      ${failed.length}`,
+      `   Time        ${formatElapsed(startTime)}`,
+      failed.length > 0
+        ? `\n${chalk.yellow('Failed parts:')} ${failed.join(', ')}\nRe-run and enter ${Math.min(...failed)} as the start part.`
+        : '',
+    ].filter(Boolean).join('\n'),
+    'Summary'
+  );
+
+  if (completed + skipped === count) {
+    outro(chalk.green('All done! Import into Immich with:') + '\n\n' +
+      chalk.dim(`  immich-go upload google-photos \\\n`) +
+      chalk.dim(`    --server http://localhost:2283 \\\n`) +
+      chalk.dim(`    --api-key YOUR_KEY \\\n`) +
+      chalk.dim(`    ${outputDir}`)
+    );
+  } else {
+    outro(chalk.yellow('Finished with errors. Re-run to retry failed parts.'));
+  }
 }
 
 main().catch(err => {
-  console.error('Fatal error:', err.message);
+  log.error(err.message);
   process.exit(1);
 });
