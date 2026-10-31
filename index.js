@@ -182,7 +182,10 @@ async function main() {
         tab.goto(url),
       ]);
 
-      const filename = download.suggestedFilename();
+      let filename = download.suggestedFilename();
+      if (!filename.toLowerCase().endsWith('.zip')) {
+        filename = `takeout-part-${String(i).padStart(3, '0')}.zip`;
+      }
       const destPath = path.join(outputDir, filename);
 
       // Skip if already fully downloaded
